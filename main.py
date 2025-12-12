@@ -22,7 +22,9 @@ Fields:
 - depth_ft: numeric if mentioned.
 - step: e.g. "casing", "rod", "grouting".
 - status: start / stop / in_progress.
-- Any other technical parameters as additional keys.
+- mud_weight: numeric if present
+- flow_rate: numeric if present
+- ground_conditions: text if present
 If unrelated to drilling, return {"type":"irrelevant"}.
 """
 
@@ -31,6 +33,7 @@ If unrelated to drilling, return {"type":"irrelevant"}.
 async def reply_to_sms(Body: str = Form(...), From: str = Form(...)):
     print(f"Received message {From}: {Body}")
 
+    # Call OpenAI to parse message
     completion = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -47,20 +50,33 @@ async def reply_to_sms(Body: str = Form(...), From: str = Form(...)):
     except Exception:
         raise HTTPException(status_code=422, detail="Invalid JSON returned from model")
 
+    # If message is irrelevant, skip logging
+    if parsed.get("type") == "irrelevant":
+        return Response(
+            content=f"<Response><Message>Message ignored, not relevant to drilling.</Message></Response>",
+            media_type="application/xml",
+        )
+
+    # Map parsed fields into dedicated table columns
     payload = {
-        "sender": From,
-        "raw_message": Body,
         "job_id": parsed.get("job_id"),
-        "parsed": parsed,
+        "raw_message": Body,
+        "step": parsed.get("step"),
+        "status": parsed.get("status"),
+        "depth_ft": parsed.get("depth_ft"),
+        "mud_weight": parsed.get("mud_weight"),
+        "flow_rate": parsed.get("flow_rate"),
+        "ground_conditions": parsed.get("ground_conditions"),
+        "drill_data": parsed,  # full JSON backup
     }
 
     try:
-        res = supabase.table("drill_logs").insert(payload).execute()
+        supabase.table("drill_logs").insert(payload).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    step = parsed.get("step") or "update"
-    depth = parsed.get("depth_ft") or "unknown"
+    step = payload.get("step") or "update"
+    depth = payload.get("depth_ft") or "unknown"
     msg = f"Logged {step} at {depth} ft."
 
     return Response(
