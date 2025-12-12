@@ -1,47 +1,69 @@
 import os
 import json
-from fastapi import FASTAPI, Form, Response
+from fastapi import FastAPI, Form, Response, HTTPException
 from supabase import create_client, Client
 from openai import OpenAI
 
 app = FastAPI()
 
 supabase: Client = create_client(
-    os.environ.get("SUPABASE_URL"),
-    os.environ.get("SUPABASE_KEY")
+    os.environ["SUPABASE_URL"],
+    os.environ["SUPABASE_KEY"],
 )
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 SYSTEM_PROMPT = """
-You are a geothermal data parser. Your job is to extract technical drilling data from unstructured text messages. Output ONLY valid JSON.
--Identify the job_if if present (look for patterns like GEO-123). If not found, return NULL. 
--Extract 'depth' in feet, 'step' (e.g. Casing, Rod, Grouting), and 'status' (Start, Stop, In Progress).
--Extract ANY other technical parameters (mud weight, flow rate, ground conditions) as their own keys
--If the text is unrelated to work, return {"type": "irrelevant"}
+You extract geothermal drilling data from unstructured field messages.
+Return ONLY strict JSON.
+
+Fields:
+- job_id: pattern GEO-### if present, else null.
+- depth_ft: numeric if mentioned.
+- step: e.g. "casing", "rod", "grouting".
+- status: start / stop / in_progress.
+- Any other technical parameters as additional keys.
+If unrelated to drilling, return {"type":"irrelevant"}.
 """
+
 
 @app.post("/sms")
 async def reply_to_sms(Body: str = Form(...), From: str = Form(...)):
-        print(f"Received message {From}: {Body}")
+    print(f"Received message {From}: {Body}")
 
     completion = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": Body}
+            {"role": "user", "content": Body},
         ],
-        temperature=0
+        temperature=0,
     )
 
-    parsed_data = json.load(completion.choices[0].messages.content)
+    raw = completion.choices[0].message.content
 
-    data_payload = {
-        "job_id": parsed_data.get("job_id", "UNKNOWN"),
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid JSON returned from model")
+
+    payload = {
+        "sender": From,
         "raw_message": Body,
-        "drill_data": parsed_data
+        "job_id": parsed.get("job_id"),
+        "parsed": parsed,
     }
-    supabase.table("drill_logs".insert(data_payload).execute
 
-    response_msg = f"Copy. Logged {parsed_data.get('step', 'update')} at {passed_data.get('depth', 'unknown')} ft."
-    return Response(content=f"<Response><Message>{response_msg}</Message></Response>", media_type = application/xml")
+    try:
+        res = supabase.table("drill_logs").insert(payload).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    step = parsed.get("step") or "update"
+    depth = parsed.get("depth_ft") or "unknown"
+    msg = f"Logged {step} at {depth} ft."
+
+    return Response(
+        content=f"<Response><Message>{msg}</Message></Response>",
+        media_type="application/xml",
+    )
